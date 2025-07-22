@@ -43,6 +43,7 @@ const REALTIME_TOPIC_PREFIX = 'checkers-game-';
 const lobbyContainer = document.getElementById('lobby-container')!;
 const nameForm = document.getElementById('name-form')!;
 const playerNameInput = document.getElementById('player-name') as HTMLInputElement;
+const playFriendButton = document.getElementById('play-friend-button')!;
 
 const waitingRoomContainer = document.getElementById('waiting-room-container')!;
 const shareLinkInput = document.getElementById('share-link-input') as HTMLInputElement;
@@ -88,7 +89,6 @@ async function listenForGameEvents(gameId: string) {
             if (done) break;
             
             const chunk = decoder.decode(value, { stream: true });
-            // ntfy.sh sends data line-by-line.
             const lines = chunk.split('\n').filter(line => line.trim() !== '');
             for (const line of lines) {
                 try {
@@ -105,7 +105,6 @@ async function listenForGameEvents(gameId: string) {
     } catch (error) {
         if ((error as Error).name !== 'AbortError') {
             console.error("Connection error, retrying...", error);
-            // Simple retry logic
             setTimeout(() => listenForGameEvents(gameId), 3000);
         }
     }
@@ -164,35 +163,48 @@ function getAllValidMoves(board: Board, player: PlayerRole): Move[] {
         for (let c = 0; c < 8; c++) {
             const piece = board[r][c];
             if (piece && playerPieces.includes(piece as Piece)) {
-                allMoves.push(...getMovesForPiece(board, r, c, false));
+                allMoves.push(...getMovesForPiece(board, r, c));
             }
         }
     }
     return allMoves;
 }
 
-function getMovesForPiece(board: Board, r: number, c: number, includeJumps: boolean): Move[] {
+function getMovesForPiece(board: Board, r: number, c: number): Move[] {
     const piece = board[r][c];
     if (!piece) return [];
     const moves: Move[] = [];
     const moveDirs = getMoveDirections(piece);
 
+    // Standard moves
     for (const [dr, dc] of moveDirs) {
         const newR = r + dr, newC = c + dc;
         if (isValidSquare(newR, newC) && board[newR][newC] === EMPTY) {
-            if (!includeJumps) moves.push({ from: [r, c], to: [newR, newC] });
-        } else if (isValidSquare(newR, newC) && isOpponent(piece, board[newR][newC])) {
-            const jumpR = newR + dr, jumpC = newC + dc;
-            if (isValidSquare(jumpR, jumpC) && board[jumpR][jumpC] === EMPTY) {
-                moves.push({ from: [r, c], to: [jumpR, jumpC] });
-            }
+            moves.push({ from: [r, c], to: [newR, newC] });
         }
     }
-    return moves;
+
+    // Jumps (handled by getJumpsForPiece, but needed for move generation)
+    moves.push(...getJumpsForPiece(board, r, c));
+    return [...new Set(moves)]; // Return unique moves
 }
 
 function getJumpsForPiece(board: Board, r: number, c: number): Move[] {
-    return getMovesForPiece(board, r, c, true).filter(move => Math.abs(move.from[0] - move.to[0]) === 2);
+    const piece = board[r][c];
+    if (!piece) return [];
+    const jumps: Move[] = [];
+    const moveDirs = getMoveDirections(piece);
+    
+    for (const [dr, dc] of moveDirs) {
+        const newR = r + dr, newC = c + dc;
+        if (isValidSquare(newR, newC) && isOpponent(piece, board[newR][newC])) {
+            const jumpR = newR + dr, jumpC = newC + dc;
+            if (isValidSquare(jumpR, jumpC) && board[jumpR][jumpC] === EMPTY) {
+                jumps.push({ from: [r, c], to: [jumpR, jumpC] });
+            }
+        }
+    }
+    return jumps;
 }
 
 function getMoveDirections(piece: Piece): [number, number][] {
@@ -287,13 +299,17 @@ function renderBoard() {
 }
 
 function updateStatus(text?: string) {
+    if (text) { // Allow overriding status
+        statusDisplay.textContent = text;
+        return;
+    }
     if (!gameState) {
-        statusDisplay.textContent = text || 'Loading...';
+        statusDisplay.textContent = 'Loading...';
         return;
     }
     if (gameState.isGameOver) {
-        const winnerName = gameState.winner === localPlayerRole ? "You" : (gameState.winner === PLAYER_1_PIECE ? gameState.player1Name : gameState.player2Name);
-        statusDisplay.textContent = `${winnerName} Win!`;
+        const winnerName = gameState.winner === localPlayerRole ? "You" : getOpponentName();
+        statusDisplay.textContent = `${winnerName} Win${winnerName === 'You' ? '' : 's'}!`;
         return;
     }
     const isMyTurn = gameState.currentPlayer === localPlayerRole;
@@ -337,8 +353,35 @@ function getModelCoords(r_view: number, c_view: number): [number, number] {
     }
 }
 
-
 // --- EVENT HANDLERS & GAME FLOW ---
+
+async function finalizeTurn(newBoard: Board, lastMove: Move) {
+    if (!gameState) return;
+    gameState.board = newBoard;
+    const isJump = Math.abs(lastMove.from[0] - lastMove.to[0]) === 2;
+
+    // Check for multi-jumps
+    if (isJump) {
+        const nextJumps = getJumpsForPiece(newBoard, lastMove.to[0], lastMove.to[1]);
+        if (nextJumps.length > 0) {
+            // The current player's turn continues for another jump
+            selectedPiece = { row: lastMove.to[0], col: lastMove.to[1] };
+            validMovesForSelectedPiece = nextJumps;
+            renderBoard();
+            return; // End here, do not switch player
+        }
+    }
+    
+    // Turn is over, switch player
+    gameState.currentPlayer = gameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE;
+    
+    // Check for winner
+    gameState.winner = checkForWinner(gameState.board, gameState.currentPlayer);
+    gameState.isGameOver = !!gameState.winner;
+
+    // Send state update
+    await sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
+}
 
 function handleIncomingMessage(message: GameMessage) {
     if (message.type === 'player_join' && localPlayerRole === PLAYER_1_PIECE) {
@@ -369,43 +412,19 @@ async function handleSquareClick(e: Event) {
     const row = parseInt(target.dataset.row!, 10);
     const col = parseInt(target.dataset.col!, 10);
 
-    const playerPieces = localPlayerRole === PLAYER_1_PIECE ? [PLAYER_1_PIECE, PLAYER_1_KING] : [PLAYER_2_PIECE, PLAYER_2_KING];
-    const pieceAtClick = gameState.board[row][col];
-    
     // Attempt to make a move
     const move = validMovesForSelectedPiece.find(m => m.to[0] === row && m.to[1] === col);
     if (move) {
         const newBoard = applyMove(gameState.board, move);
-        const isJump = Math.abs(move.from[0] - move.to[0]) === 2;
-        
-        let nextJumps: Move[] = [];
-        if (isJump) {
-            nextJumps = getJumpsForPiece(newBoard, move.to[0], move.to[1]);
-        }
-        
         selectedPiece = null;
         validMovesForSelectedPiece = [];
-
-        if(nextJumps.length > 0) {
-            // Continue player's turn for multi-jump
-            gameState.board = newBoard;
-            selectedPiece = { row: move.to[0], col: move.to[1] };
-            validMovesForSelectedPiece = nextJumps;
-            renderBoard(); // Re-render to show intermediate board state and new moves
-            return;
-        }
-
-        // Finalize turn
-        gameState.board = newBoard;
-        gameState.winner = checkForWinner(gameState.board, gameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE);
-        gameState.isGameOver = !!gameState.winner;
-        gameState.currentPlayer = gameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE;
-        
-        await sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
+        await finalizeTurn(newBoard, move);
         return;
     }
 
     // Select a piece
+    const playerPieces = localPlayerRole === PLAYER_1_PIECE ? [PLAYER_1_PIECE, PLAYER_1_KING] : [PLAYER_2_PIECE, PLAYER_2_KING];
+    const pieceAtClick = gameState.board[row][col];
     if (pieceAtClick && playerPieces.includes(pieceAtClick as Piece)) {
         selectedPiece = { row, col };
         const allPlayerMoves = getAllValidMoves(gameState.board, localPlayerRole);
@@ -442,7 +461,7 @@ function handleJoinGame(gameId: string, name: string) {
     listenForGameEvents(gameId);
     sendGameMessage(gameId, { type: 'player_join', payload: { playerName: name } });
     updateStatus('Joining game...');
-    showScreen('game'); // Tentatively show game screen, will be updated on first state receive
+    showScreen('game'); // Tentatively show game screen
 }
 
 // --- SCREEN MANAGEMENT ---
@@ -462,9 +481,12 @@ function showWaitingRoom() {
 
 function showGameScreen() {
     if (!gameState || !localPlayerRole) return;
+
     const isP1 = localPlayerRole === PLAYER_1_PIECE;
     player1Label.textContent = `${isP1 ? gameState.player1Name + " (You)" : gameState.player1Name} (Red)`;
     player2Label.textContent = `${!isP1 ? (gameState.player2Name ?? 'You') + " (You)" : (gameState.player2Name ?? 'Opponent')} (Black)`;
+    chatContainer.classList.remove('hidden');
+
     showScreen('game');
     renderBoard();
     updateStatus();
@@ -472,12 +494,12 @@ function showGameScreen() {
 
 function getOpponentName(): string {
     if (!gameState) return 'Opponent';
-    return localPlayerRole === PLAYER_1_PIECE ? gameState.player2Name ?? 'Opponent' : gameState.player1Name;
+    return localPlayerRole === PLAYER_1_PIECE ? (gameState.player2Name ?? 'Opponent') : gameState.player1Name;
 }
 
 // --- INITIALIZATION ---
 function init() {
-    nameForm.addEventListener('submit', (e) => {
+    nameForm.addEventListener('submit', (e: SubmitEvent) => {
         e.preventDefault();
         const name = playerNameInput.value.trim();
         if (!name) return;
@@ -517,6 +539,8 @@ function init() {
                 payload: { senderName, text }
             };
             sendGameMessage(gameState.gameId, message);
+            // Also display locally immediately
+            displayChatMessage(senderName, text);
             chatInput.value = '';
         }
     });
@@ -524,6 +548,7 @@ function init() {
     const gameId = window.location.hash.substring(1);
     if(gameId) {
         playerNameInput.focus();
+        playFriendButton.textContent = 'Join Game';
     }
     showScreen('lobby');
 }

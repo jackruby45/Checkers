@@ -14,6 +14,7 @@
     --text-color: #ffffff;
     --font-family: 'Poppins', sans-serif;
     --primary-action-color: #4a9af5;
+    --secondary-action-color: #7d7d7d;
 }
 
 body {
@@ -105,22 +106,22 @@ h1 {
     box-shadow: 0 0 5px var(--highlight-selected);
 }
 
-#create-game-button {
+#play-friend-button {
     font-family: var(--font-family);
     font-size: 1.2rem;
     font-weight: 600;
-    padding: 0.8rem 2rem;
+    padding: 0.8rem 1rem;
     border: none;
     border-radius: 8px;
-    background-color: var(--primary-action-color);
     color: var(--text-color);
     cursor: pointer;
     transition: background-color 0.2s;
     box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    width: 100%;
     margin-top: 1rem;
+    background-color: var(--primary-action-color);
 }
-
-#create-game-button:hover {
+#play-friend-button:hover {
     background-color: #63b4ff;
 }
 
