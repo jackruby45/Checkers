@@ -221,9 +221,9 @@ function isValidSquare(r: number, c: number): boolean {
 
 function isOpponent(piece: Piece, otherPiece: SquareContent): boolean {
     if (!otherPiece) return false;
-    const isP1 = piece === PLAYER_1_PIECE || piece === PLAYER_1_KING;
-    const isP2 = otherPiece === PLAYER_2_PIECE || otherPiece === PLAYER_2_KING;
-    return isP1 !== isP2;
+    const pieceIsP1 = (piece === PLAYER_1_PIECE || piece === PLAYER_1_KING);
+    const otherPieceIsP1 = (otherPiece === PLAYER_1_PIECE || otherPiece === PLAYER_1_KING);
+    return pieceIsP1 !== otherPieceIsP1;
 }
 
 function applyMove(board: Board, move: Move): Board {
