@@ -60,6 +60,7 @@ const statusDisplay = document.getElementById('status-display')!;
 const resetButton = document.getElementById('reset-button')!;
 const player1Label = document.getElementById('player-1-label')!;
 const player2Label = document.getElementById('player-2-label')!;
+const slackerMessage = document.getElementById('slacker-message')!;
 
 const chatContainer = document.getElementById('chat-container')!;
 const chatMessages = document.getElementById('chat-messages')!;
@@ -72,6 +73,32 @@ let gameState: GameState | null = null;
 let localPlayerRole: PlayerRole | null = null;
 let selectedPiece: { row: number, col: number } | null = null;
 let validMovesForSelectedPiece: Move[] = [];
+let slackerTimeout: number;
+
+// --- HELPER FUNCTIONS ---
+
+function showSlackerMessage() {
+    if (slackerTimeout) {
+        clearTimeout(slackerTimeout);
+    }
+    slackerMessage.classList.add('visible');
+    slackerTimeout = window.setTimeout(() => {
+        slackerMessage.classList.remove('visible');
+    }, 3000);
+}
+
+function countPieces(board: Board): number {
+    let count = 0;
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            if (board[r][c] !== EMPTY) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
 
 // --- REAL-TIME COMMUNICATION ---
 
@@ -358,7 +385,10 @@ function getModelCoords(r_view: number, c_view: number): [number, number] {
 
 async function finalizeTurn(newBoard: Board, lastMove: Move) {
     if (!gameState) return;
-    gameState.board = newBoard;
+    
+    const newGameState: GameState = JSON.parse(JSON.stringify(gameState));
+    newGameState.board = newBoard;
+
     const isJump = Math.abs(lastMove.from[0] - lastMove.to[0]) === 2;
 
     // Check for multi-jumps
@@ -366,22 +396,25 @@ async function finalizeTurn(newBoard: Board, lastMove: Move) {
         const nextJumps = getJumpsForPiece(newBoard, lastMove.to[0], lastMove.to[1]);
         if (nextJumps.length > 0) {
             // The current player's turn continues for another jump
+            // We update the local board state to show the intermediate jump and show the message
+            gameState.board = newBoard; 
             selectedPiece = { row: lastMove.to[0], col: lastMove.to[1] };
             validMovesForSelectedPiece = nextJumps;
+            showSlackerMessage();
             renderBoard();
-            return; // End here, do not switch player
+            return; // End here, do not switch player or send update
         }
     }
     
     // Turn is over, switch player
-    gameState.currentPlayer = gameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE;
+    newGameState.currentPlayer = newGameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE;
     
     // Check for winner
-    gameState.winner = checkForWinner(gameState.board, gameState.currentPlayer);
-    gameState.isGameOver = !!gameState.winner;
+    newGameState.winner = checkForWinner(newGameState.board, newGameState.currentPlayer);
+    newGameState.isGameOver = !!newGameState.winner;
 
     // Send state update
-    await sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
+    await sendGameMessage(newGameState.gameId, { type: 'game_state', payload: newGameState });
 }
 
 function handleIncomingMessage(message: GameMessage) {
@@ -392,8 +425,18 @@ function handleIncomingMessage(message: GameMessage) {
             sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
         }
     } else if (message.type === 'game_state') {
+        const oldBoard = gameState?.board;
         const isFirstStateReception = !gameState;
+        
         gameState = message.payload;
+
+        if (oldBoard) {
+            const oldCount = countPieces(oldBoard);
+            const newCount = countPieces(gameState.board);
+            if (newCount < oldCount) {
+                showSlackerMessage();
+            }
+        }
 
         if (isFirstStateReception) {
             // This is the first time we're getting the state, either as P2 joining
