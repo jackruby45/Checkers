@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Two-Player Checkers</title>
+    <title>Real-Time Checkers</title>
     <link rel="stylesheet" href="index.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,53 +12,57 @@
 </head>
 <body>
     <div id="game-container">
-        <h1>Two-Player Checkers</h1>
+        <h1>Real-Time Checkers</h1>
 
-        <div id="name-entry-container">
-            <h2>Enter Player Names</h2>
+        <div id="lobby-container">
+            <h2>Play Online</h2>
             <form id="name-form">
                 <div class="form-group">
-                    <label for="player1-name">Player 1 (Red)</label>
-                    <input type="text" id="player1-name" placeholder="Enter name for Player 1" maxlength="20">
+                    <label for="player-name">Your Name</label>
+                    <input type="text" id="player-name" placeholder="Enter your name" maxlength="20" required>
                 </div>
-                <div class="form-group">
-                    <label for="player2-name">Player 2 (Black)</label>
-                    <input type="text" id="player2-name" placeholder="Enter name for Player 2" maxlength="20">
-                </div>
-                <button type="submit" id="start-game-button">Start Game</button>
+                <button type="submit" id="create-game-button">Create Game</button>
             </form>
         </div>
+
+        <div id="waiting-room-container" class="hidden">
+            <h2>Waiting for Opponent</h2>
+            <p>Share this link with a friend to start playing:</p>
+            <div class="share-link-container">
+                <input type="text" id="share-link-input" readonly>
+                <button id="copy-link-button">Copy</button>
+            </div>
+            <div class="spinner"></div>
+            <p id="waiting-status">Waiting for opponent to join...</p>
+        </div>
+
 
         <div id="game-content" class="hidden">
             <div id="status-display">Loading...</div>
             <div id="board-area">
-                <div id="player-2-label" class="player-label">Player 2 (Black)</div>
+                <div id="player-2-label" class="player-label">Opponent (Black)</div>
                 <div id="board-container">
                     <div id="board"></div>
                 </div>
-                <div id="player-1-label" class="player-label">Player 1 (Red)</div>
+                <div id="player-1-label" class="player-label">You (Red)</div>
+            </div>
+            <div id="chat-container">
+                <div id="chat-messages"></div>
+                <form id="chat-form">
+                    <input type="text" id="chat-input" placeholder="Say something..." autocomplete="off">
+                    <button type="submit">Send</button>
+                </form>
             </div>
             <button id="reset-button">New Game</button>
         </div>
     </div>
 
-    <div id="share-modal-overlay" class="hidden">
-        <div id="share-modal">
-            <h3 id="share-modal-title">Share Link to Play</h3>
-            <p id="share-modal-text">Share this link with your opponent:</p>
-            <input type="text" id="share-link-input" readonly>
-            <div class="modal-buttons">
-                <button id="copy-link-button">Copy Link</button>
-                <button id="close-modal-button">Close</button>
-            </div>
-        </div>
-    </div>
-
-
     <script type="importmap">
 {
   "imports": {
-    "@google/genai": "https://esm.sh/@google/genai@^0.7.0"
+    "@google/genai": "https://esm.sh/@google/genai@^0.7.0",
+    "preact": "https://esm.sh/preact@10.22.1",
+    "preact/hooks": "https://esm.sh/preact@10.22.1/hooks"
   }
 }
 </script>

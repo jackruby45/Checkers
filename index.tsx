@@ -4,186 +4,141 @@
  */
 
 // --- TYPE DEFINITIONS AND CONSTANTS ---
-const PLAYER_PIECE = 'r'; // Player 1
-const AI_PIECE = 'b'; // Player 2 (used as Player 2 identifier)
-const PLAYER_KING = 'R';
-const AI_KING = 'B';
+const PLAYER_1_PIECE = 'r';
+const PLAYER_2_PIECE = 'b';
+const PLAYER_1_KING = 'R';
+const PLAYER_2_KING = 'B';
 const EMPTY = null;
 
-type Piece = typeof PLAYER_PIECE | typeof AI_PIECE | typeof PLAYER_KING | typeof AI_KING;
+type Piece = typeof PLAYER_1_PIECE | typeof PLAYER_2_PIECE | typeof PLAYER_1_KING | typeof PLAYER_2_KING;
 type SquareContent = Piece | typeof EMPTY;
 type Board = SquareContent[][];
 type Move = { from: [number, number], to: [number, number] };
-type PlayerRole = typeof PLAYER_PIECE | typeof AI_PIECE;
+type PlayerRole = typeof PLAYER_1_PIECE | typeof PLAYER_2_PIECE;
 
-// Compact representation for URL state
-type BoardForURL = (0 | 1 | 2 | 3 | 4)[]; // 0:E, 1:P, 2:A, 3:PK, 4:AK
-interface GameStateForURL {
-    b: BoardForURL,
-    p1n: string,
-    p2n: string,
-    cp: PlayerRole,
-    go: boolean,
-    sp: { row: number, col: number } | null, // for multi-jump state
-}
+type GameState = {
+    gameId: string;
+    board: Board;
+    currentPlayer: PlayerRole;
+    player1Name: string;
+    player2Name: string | null;
+    isGameOver: boolean;
+    winner: PlayerRole | null;
+};
+
+type GameMessage = {
+    type: 'game_state';
+    payload: GameState;
+} | {
+    type: 'player_join';
+    payload: { playerName: string };
+} | {
+    type: 'chat_message',
+    payload: { senderName: string, text: string }
+};
+
+const REALTIME_TOPIC_PREFIX = 'checkers-game-';
 
 // --- DOM ELEMENTS ---
-// Name Entry
-const nameEntryContainer = document.getElementById('name-entry-container')!;
+const lobbyContainer = document.getElementById('lobby-container')!;
 const nameForm = document.getElementById('name-form')!;
-const player1NameInput = document.getElementById('player1-name') as HTMLInputElement;
-const player2NameInput = document.getElementById('player2-name') as HTMLInputElement;
+const playerNameInput = document.getElementById('player-name') as HTMLInputElement;
 
-// Game Screen
+const waitingRoomContainer = document.getElementById('waiting-room-container')!;
+const shareLinkInput = document.getElementById('share-link-input') as HTMLInputElement;
+const copyLinkButton = document.getElementById('copy-link-button')!;
+
 const gameContent = document.getElementById('game-content')!;
+const boardContainer = document.getElementById('board-container')!;
 const boardElement = document.getElementById('board')!;
 const statusDisplay = document.getElementById('status-display')!;
 const resetButton = document.getElementById('reset-button')!;
 const player1Label = document.getElementById('player-1-label')!;
 const player2Label = document.getElementById('player-2-label')!;
 
-// Share Modal
-const shareModalOverlay = document.getElementById('share-modal-overlay')!;
-const shareModalTitle = document.getElementById('share-modal-title')!;
-const shareModalText = document.getElementById('share-modal-text')!;
-const shareLinkInput = document.getElementById('share-link-input') as HTMLInputElement;
-const copyLinkButton = document.getElementById('copy-link-button')!;
-const closeModalButton = document.getElementById('close-modal-button')!;
+const chatContainer = document.getElementById('chat-container')!;
+const chatMessages = document.getElementById('chat-messages')!;
+const chatForm = document.getElementById('chat-form')!;
+const chatInput = document.getElementById('chat-input') as HTMLInputElement;
 
-// --- GAME STATE (now managed via URL) ---
-let boardState: Board = [];
-let currentPlayer: PlayerRole = PLAYER_PIECE;
+
+// --- GAME STATE ---
+let gameState: GameState | null = null;
+let localPlayerRole: PlayerRole | null = null;
 let selectedPiece: { row: number, col: number } | null = null;
-let isGameOver = false;
 let validMovesForSelectedPiece: Move[] = [];
-let player1Name = 'Player 1';
-let player2Name = 'Player 2';
 
-// --- URL STATE MANAGEMENT ---
+// --- REAL-TIME COMMUNICATION ---
 
-function serializeState(isNewGame = false): string {
-    const boardForURL = boardState.flat().map(p => {
-        if (p === PLAYER_PIECE) return 1;
-        if (p === AI_PIECE) return 2;
-        if (p === PLAYER_KING) return 3;
-        if (p === AI_KING) return 4;
-        return 0;
-    }) as BoardForURL;
+async function listenForGameEvents(gameId: string) {
+    const topic = `${REALTIME_TOPIC_PREFIX}${gameId}`;
+    const controller = new AbortController();
 
-    const state: GameStateForURL = {
-        b: boardForURL,
-        p1n: player1Name,
-        p2n: player2Name,
-        cp: currentPlayer,
-        go: isGameOver,
-        sp: selectedPiece, // Store selected piece for multi-jump
-    };
-
-    return btoa(JSON.stringify(state));
-}
-
-function deserializeState(hash: string) {
     try {
-        const json = atob(hash.substring(1));
-        const state: GameStateForURL = JSON.parse(json);
+        const response = await fetch(`https://ntfy.sh/${topic}/json`, {
+            signal: controller.signal,
+        });
 
-        boardState = Array(8).fill(null).map(() => Array(8).fill(EMPTY));
-        for (let i = 0; i < 64; i++) {
-            const row = Math.floor(i / 8);
-            const col = i % 8;
-            const p = state.b[i];
-            if (p === 1) boardState[row][col] = PLAYER_PIECE;
-            else if (p === 2) boardState[row][col] = AI_PIECE;
-            else if (p === 3) boardState[row][col] = PLAYER_KING;
-            else if (p === 4) boardState[row][col] = AI_KING;
-            else boardState[row][col] = EMPTY;
+        const reader = response.body?.getReader();
+        if (!reader) return;
+
+        const decoder = new TextDecoder();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunk = decoder.decode(value, { stream: true });
+            // ntfy.sh sends data line-by-line.
+            const lines = chunk.split('\n').filter(line => line.trim() !== '');
+            for (const line of lines) {
+                try {
+                    const data = JSON.parse(line);
+                    if (data.event === 'message') {
+                        const message: GameMessage = JSON.parse(data.message);
+                        handleIncomingMessage(message);
+                    }
+                } catch (e) {
+                    console.error("Error parsing message chunk: ", e);
+                }
+            }
         }
-
-        player1Name = state.p1n;
-        player2Name = state.p2n;
-        currentPlayer = state.cp;
-        isGameOver = state.go;
-        selectedPiece = state.sp;
-
-        if (selectedPiece) {
-            validMovesForSelectedPiece = getJumpsForPiece(boardState, selectedPiece.row, selectedPiece.col);
-        } else {
-            validMovesForSelectedPiece = [];
+    } catch (error) {
+        if ((error as Error).name !== 'AbortError') {
+            console.error("Connection error, retrying...", error);
+            // Simple retry logic
+            setTimeout(() => listenForGameEvents(gameId), 3000);
         }
-
-        return true;
-    } catch (e) {
-        console.error("Failed to parse game state from URL:", e);
-        return false;
     }
 }
 
-function updateURLWithState(isNewGame = false) {
-    const hash = serializeState(isNewGame);
-    // This will trigger the 'hashchange' event listener
-    window.location.hash = hash;
-    // Show modal after state is set
-    setTimeout(() => showShareModal(isNewGame), 0);
-}
-
-function loadGameFromURL() {
-    const hash = window.location.hash;
-    if (hash && deserializeState(hash)) {
-        showGameScreen();
-        player1Label.textContent = `${player1Name} (Red)`;
-        player2Label.textContent = `${player2Name} (Black)`;
-        renderBoard();
-
-        if (isGameOver) {
-            const winner = currentPlayer === PLAYER_PIECE ? player2Name : player1Name;
-            updateStatus(`${winner} Wins!`);
-        } else {
-            updateStatus(`${currentPlayer === PLAYER_PIECE ? player1Name : player2Name}'s Turn`);
-        }
-
-    } else {
-        showNameEntryScreen();
+async function sendGameMessage(gameId: string, message: GameMessage) {
+    const topic = `${REALTIME_TOPIC_PREFIX}${gameId}`;
+    try {
+        await fetch(`https://ntfy.sh/${topic}`, {
+            method: 'POST',
+            body: JSON.stringify(message),
+        });
+    } catch (error) {
+        console.error("Failed to send message:", error);
+        updateStatus("Connection error! Can't send move.");
     }
 }
-
-// --- MODAL LOGIC ---
-function showShareModal(isNewGame = false) {
-    const opponentName = currentPlayer === PLAYER_PIECE ? player2Name : player1Name;
-    shareLinkInput.value = window.location.href;
-    
-    if (isGameOver) {
-        const winnerName = currentPlayer === PLAYER_PIECE ? player2Name : player1Name;
-        shareModalTitle.textContent = 'Game Over!';
-        shareModalText.textContent = `${winnerName} has won! Share the final board state:`;
-    } else if (isNewGame) {
-        shareModalTitle.textContent = 'Game Ready!';
-        shareModalText.textContent = `Send this link to ${opponentName} to start the game!`;
-    } else {
-        shareModalTitle.textContent = `It's ${opponentName}'s Turn!`;
-        shareModalText.textContent = `Send this link back to ${opponentName}:`;
-    }
-    copyLinkButton.textContent = 'Copy Link';
-    shareModalOverlay.classList.remove('hidden');
-}
-
-function hideShareModal() {
-    shareModalOverlay.classList.add('hidden');
-}
-
 
 // --- GAME LOGIC ---
 
 function createInitialBoard(): Board {
     const board: Board = Array(8).fill(null).map(() => Array(8).fill(EMPTY));
     for (let i = 0; i < 8; i++) {
+        // Player 2 pieces (top rows)
         if (i < 3) {
             for (let j = 0; j < 8; j++) {
-                if ((i + j) % 2 !== 0) board[i][j] = AI_PIECE;
+                if ((i + j) % 2 !== 0) board[i][j] = PLAYER_2_PIECE;
             }
         }
+        // Player 1 pieces (bottom rows)
         if (i > 4) {
             for (let j = 0; j < 8; j++) {
-                if ((i + j) % 2 !== 0) board[i][j] = PLAYER_PIECE;
+                if ((i + j) % 2 !== 0) board[i][j] = PLAYER_1_PIECE;
             }
         }
     }
@@ -192,29 +147,40 @@ function createInitialBoard(): Board {
 
 function getAllValidMoves(board: Board, player: PlayerRole): Move[] {
     const allMoves: Move[] = [];
-    const playerPieces = player === PLAYER_PIECE ? [PLAYER_PIECE, PLAYER_KING] : [AI_PIECE, AI_KING];
+    const playerPieces = player === PLAYER_1_PIECE ? [PLAYER_1_PIECE, PLAYER_1_KING] : [PLAYER_2_PIECE, PLAYER_2_KING];
+    const mandatoryJumps: Move[] = [];
 
     for (let r = 0; r < 8; r++) {
         for (let c = 0; c < 8; c++) {
             const piece = board[r][c];
-            if (piece && playerPieces.includes(piece)) {
-                const pieceMoves = getMovesForPiece(board, r, c);
-                allMoves.push(...pieceMoves);
+            if (piece && playerPieces.includes(piece as Piece)) {
+                mandatoryJumps.push(...getJumpsForPiece(board, r, c));
+            }
+        }
+    }
+    if (mandatoryJumps.length > 0) return mandatoryJumps;
+
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const piece = board[r][c];
+            if (piece && playerPieces.includes(piece as Piece)) {
+                allMoves.push(...getMovesForPiece(board, r, c, false));
             }
         }
     }
     return allMoves;
 }
 
-function getMovesForPiece(board: Board, r: number, c: number): Move[] {
+function getMovesForPiece(board: Board, r: number, c: number, includeJumps: boolean): Move[] {
     const piece = board[r][c];
     if (!piece) return [];
     const moves: Move[] = [];
     const moveDirs = getMoveDirections(piece);
+
     for (const [dr, dc] of moveDirs) {
         const newR = r + dr, newC = c + dc;
         if (isValidSquare(newR, newC) && board[newR][newC] === EMPTY) {
-            moves.push({ from: [r, c], to: [newR, newC] });
+            if (!includeJumps) moves.push({ from: [r, c], to: [newR, newC] });
         } else if (isValidSquare(newR, newC) && isOpponent(piece, board[newR][newC])) {
             const jumpR = newR + dr, jumpC = newC + dc;
             if (isValidSquare(jumpR, jumpC) && board[jumpR][jumpC] === EMPTY) {
@@ -226,26 +192,13 @@ function getMovesForPiece(board: Board, r: number, c: number): Move[] {
 }
 
 function getJumpsForPiece(board: Board, r: number, c: number): Move[] {
-    const piece = board[r][c];
-    if (!piece) return [];
-    const jumps: Move[] = [];
-    const moveDirs = getMoveDirections(piece);
-    for (const [dr, dc] of moveDirs) {
-        const newR = r + dr, newC = c + dc;
-        if (isValidSquare(newR, newC) && isOpponent(piece, board[newR][newC])) {
-            const jumpR = newR + dr, jumpC = newC + dc;
-            if (isValidSquare(jumpR, jumpC) && board[jumpR][jumpC] === EMPTY) {
-                jumps.push({ from: [r, c], to: [jumpR, jumpC] });
-            }
-        }
-    }
-    return jumps;
+    return getMovesForPiece(board, r, c, true).filter(move => Math.abs(move.from[0] - move.to[0]) === 2);
 }
 
 function getMoveDirections(piece: Piece): [number, number][] {
-    if (piece === PLAYER_PIECE) return [[-1, -1], [-1, 1]];
-    if (piece === AI_PIECE) return [[1, -1], [1, 1]];
-    if (piece === PLAYER_KING || piece === AI_KING) return [[-1, -1], [-1, 1], [1, -1], [1, 1]];
+    if (piece === PLAYER_1_PIECE) return [[-1, -1], [-1, 1]];
+    if (piece === PLAYER_2_PIECE) return [[1, -1], [1, 1]];
+    if (piece === PLAYER_1_KING || piece === PLAYER_2_KING) return [[-1, -1], [-1, 1], [1, -1], [1, 1]];
     return [];
 }
 
@@ -255,9 +208,9 @@ function isValidSquare(r: number, c: number): boolean {
 
 function isOpponent(piece: Piece, otherPiece: SquareContent): boolean {
     if (!otherPiece) return false;
-    const isPlayerPiece = piece === PLAYER_PIECE || piece === PLAYER_KING;
-    const isOtherPlayerPiece = otherPiece === PLAYER_PIECE || otherPiece === PLAYER_KING;
-    return isPlayerPiece !== isOtherPlayerPiece;
+    const isP1 = piece === PLAYER_1_PIECE || piece === PLAYER_1_KING;
+    const isP2 = otherPiece === PLAYER_2_PIECE || otherPiece === PLAYER_2_KING;
+    return isP1 !== isP2;
 }
 
 function applyMove(board: Board, move: Move): Board {
@@ -273,15 +226,15 @@ function applyMove(board: Board, move: Move): Board {
         newBoard[capturedRow][capturedCol] = EMPTY;
     }
 
-    if (to[0] === 0 && piece === PLAYER_PIECE) newBoard[to[0]][to[1]] = PLAYER_KING;
-    if (to[0] === 7 && piece === AI_PIECE) newBoard[to[0]][to[1]] = AI_KING;
-    
+    if (to[0] === 0 && piece === PLAYER_1_PIECE) newBoard[to[0]][to[1]] = PLAYER_1_KING;
+    if (to[0] === 7 && piece === PLAYER_2_PIECE) newBoard[to[0]][to[1]] = PLAYER_2_KING;
+
     return newBoard;
 }
 
-function checkForWinner(board: Board, player: PlayerRole) {
-    if (getAllValidMoves(board, player).length === 0) {
-        return player === PLAYER_PIECE ? AI_PIECE : PLAYER_PIECE;
+function checkForWinner(board: Board, playerOnTurn: PlayerRole): PlayerRole | null {
+    if (getAllValidMoves(board, playerOnTurn).length === 0) {
+        return playerOnTurn === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE;
     }
     return null;
 }
@@ -289,27 +242,41 @@ function checkForWinner(board: Board, player: PlayerRole) {
 // --- UI & RENDERING ---
 
 function renderBoard() {
+    if (!gameState) return;
     boardElement.innerHTML = '';
-    for (let r = 0; r < 8; r++) {
-        for (let c = 0; c < 8; c++) {
-            const square = document.createElement('div');
-            square.classList.add('square', (r + c) % 2 === 0 ? 'light' : 'dark');
-            square.dataset.row = r.toString();
-            square.dataset.col = c.toString();
+    
+    const isMyTurn = gameState.currentPlayer === localPlayerRole;
+    boardContainer.classList.toggle('disabled', !isMyTurn || gameState.isGameOver);
 
-            const piece = boardState[r]?.[c];
+    const validMoveTargets = validMovesForSelectedPiece.map(m => {
+        const to = getPlayerViewCoords(m.to[0], m.to[1]);
+        return to.join(',');
+    });
+
+    for (let r_view = 0; r_view < 8; r_view++) {
+        for (let c_view = 0; c_view < 8; c_view++) {
+            const square = document.createElement('div');
+            square.classList.add('square', (r_view + c_view) % 2 === 0 ? 'light' : 'dark');
+
+            const [r_model, c_model] = getModelCoords(r_view, c_view);
+            square.dataset.row = r_model.toString();
+            square.dataset.col = c_model.toString();
+            
+            const piece = gameState.board[r_model]?.[c_model];
             if (piece) {
                 const pieceElement = document.createElement('div');
                 pieceElement.classList.add('piece');
-                const type = (piece === PLAYER_PIECE || piece === PLAYER_KING) ? 'player' : 'ai';
+                const type = (piece === PLAYER_1_PIECE || piece === PLAYER_1_KING) ? 'player' : 'opponent';
                 pieceElement.classList.add(type);
-                if (piece === PLAYER_KING || piece === AI_KING) pieceElement.classList.add('king');
-                if (selectedPiece?.row === r && selectedPiece?.col === c) pieceElement.classList.add('selected');
+                if (piece === PLAYER_1_KING || piece === PLAYER_2_KING) pieceElement.classList.add('king');
+                
+                if (selectedPiece?.row === r_model && selectedPiece?.col === c_model) {
+                    pieceElement.classList.add('selected');
+                }
                 square.appendChild(pieceElement);
             }
 
-            const isValidMove = validMovesForSelectedPiece.some(m => m.to[0] === r && m.to[1] === c);
-            if (isValidMove) {
+            if (validMoveTargets.includes(`${r_view},${c_view}`)) {
                 const moveIndicator = document.createElement('div');
                 moveIndicator.classList.add('valid-move-indicator');
                 square.appendChild(moveIndicator);
@@ -319,53 +286,129 @@ function renderBoard() {
     }
 }
 
-function updateStatus(text: string) {
-    statusDisplay.textContent = text;
+function updateStatus(text?: string) {
+    if (!gameState) {
+        statusDisplay.textContent = text || 'Loading...';
+        return;
+    }
+    if (gameState.isGameOver) {
+        const winnerName = gameState.winner === localPlayerRole ? "You" : (gameState.winner === PLAYER_1_PIECE ? gameState.player1Name : gameState.player2Name);
+        statusDisplay.textContent = `${winnerName} Win!`;
+        return;
+    }
+    const isMyTurn = gameState.currentPlayer === localPlayerRole;
+    statusDisplay.textContent = isMyTurn ? "Your Turn" : `Waiting for ${getOpponentName()}'s move...`;
 }
+
+function displayChatMessage(senderName: string, text: string) {
+    const messageEl = document.createElement('div');
+    messageEl.classList.add('chat-message');
+    
+    const localPlayerName = localPlayerRole === PLAYER_1_PIECE ? gameState?.player1Name : gameState?.player2Name;
+    const type = senderName === localPlayerName ? 'sent' : 'received';
+    messageEl.classList.add(type);
+    
+    const senderEl = document.createElement('strong');
+    senderEl.textContent = senderName;
+
+    const textEl = document.createElement('span');
+    textEl.textContent = text;
+    
+    messageEl.appendChild(senderEl);
+    messageEl.appendChild(textEl);
+    
+    chatMessages.appendChild(messageEl);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function getPlayerViewCoords(r_model: number, c_model: number): [number, number] {
+    if (localPlayerRole === PLAYER_1_PIECE) {
+        return [r_model, c_model];
+    } else {
+        return [7 - r_model, 7 - c_model];
+    }
+}
+
+function getModelCoords(r_view: number, c_view: number): [number, number] {
+    if (localPlayerRole === PLAYER_1_PIECE) {
+        return [r_view, c_view];
+    } else {
+        return [7 - r_view, 7 - c_view];
+    }
+}
+
 
 // --- EVENT HANDLERS & GAME FLOW ---
 
-function handleSquareClick(e: Event) {
-    if (isGameOver) return;
+function handleIncomingMessage(message: GameMessage) {
+    if (message.type === 'player_join' && localPlayerRole === PLAYER_1_PIECE) {
+        if (gameState && !gameState.player2Name) {
+            gameState.player2Name = message.payload.playerName;
+            showGameScreen();
+            sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
+        }
+    } else if (message.type === 'game_state') {
+        const wasWaiting = !gameState?.player2Name && !!message.payload.player2Name;
+        gameState = message.payload;
+        if (wasWaiting) {
+            showGameScreen();
+        }
+        selectedPiece = null;
+        validMovesForSelectedPiece = [];
+        renderBoard();
+        updateStatus();
+    } else if (message.type === 'chat_message') {
+        displayChatMessage(message.payload.senderName, message.payload.text);
+    }
+}
+
+async function handleSquareClick(e: Event) {
+    if (!gameState || gameState.isGameOver || gameState.currentPlayer !== localPlayerRole) return;
 
     const target = e.currentTarget as HTMLDivElement;
     const row = parseInt(target.dataset.row!, 10);
     const col = parseInt(target.dataset.col!, 10);
 
-    const pieceAtClick = boardState[row][col];
-    const playerPieces = currentPlayer === PLAYER_PIECE ? [PLAYER_PIECE, PLAYER_KING] : [AI_PIECE, AI_KING];
-
+    const playerPieces = localPlayerRole === PLAYER_1_PIECE ? [PLAYER_1_PIECE, PLAYER_1_KING] : [PLAYER_2_PIECE, PLAYER_2_KING];
+    const pieceAtClick = gameState.board[row][col];
+    
+    // Attempt to make a move
     const move = validMovesForSelectedPiece.find(m => m.to[0] === row && m.to[1] === col);
     if (move) {
-        boardState = applyMove(boardState, move);
+        const newBoard = applyMove(gameState.board, move);
         const isJump = Math.abs(move.from[0] - move.to[0]) === 2;
-
+        
+        let nextJumps: Move[] = [];
         if (isJump) {
-            const nextJumps = getJumpsForPiece(boardState, move.to[0], move.to[1]);
-            if (nextJumps.length > 0) {
-                // Continue turn for multi-jump
-                selectedPiece = { row: move.to[0], col: move.to[1] };
-                updateURLWithState(); // Update URL for multi-jump state
-                return; 
-            }
+            nextJumps = getJumpsForPiece(newBoard, move.to[0], move.to[1]);
         }
         
         selectedPiece = null;
-        const nextPlayer = currentPlayer === PLAYER_PIECE ? AI_PIECE : PLAYER_PIECE;
-        const winner = checkForWinner(boardState, nextPlayer);
+        validMovesForSelectedPiece = [];
 
-        if (winner) {
-            isGameOver = true;
-        } else {
-            currentPlayer = nextPlayer;
+        if(nextJumps.length > 0) {
+            // Continue player's turn for multi-jump
+            gameState.board = newBoard;
+            selectedPiece = { row: move.to[0], col: move.to[1] };
+            validMovesForSelectedPiece = nextJumps;
+            renderBoard(); // Re-render to show intermediate board state and new moves
+            return;
         }
-        updateURLWithState();
+
+        // Finalize turn
+        gameState.board = newBoard;
+        gameState.winner = checkForWinner(gameState.board, gameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE);
+        gameState.isGameOver = !!gameState.winner;
+        gameState.currentPlayer = gameState.currentPlayer === PLAYER_1_PIECE ? PLAYER_2_PIECE : PLAYER_1_PIECE;
+        
+        await sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
         return;
     }
 
+    // Select a piece
     if (pieceAtClick && playerPieces.includes(pieceAtClick as Piece)) {
         selectedPiece = { row, col };
-        const allPlayerMoves = getAllValidMoves(boardState, currentPlayer);
+        const allPlayerMoves = getAllValidMoves(gameState.board, localPlayerRole);
         validMovesForSelectedPiece = allPlayerMoves.filter(m => m.from[0] === row && m.from[1] === col);
         renderBoard();
     } else {
@@ -375,54 +418,86 @@ function handleSquareClick(e: Event) {
     }
 }
 
-function resetGame() {
-    window.location.hash = '';
-    if (window.location.href.includes('#')) {
-       window.location.href = window.location.href.split('#')[0];
-    }
-    showNameEntryScreen();
+function handleCreateGame(name: string) {
+    localPlayerRole = PLAYER_1_PIECE;
+    const gameId = Math.random().toString(36).substring(2, 8);
+    window.location.hash = gameId;
+    
+    gameState = {
+        gameId,
+        board: createInitialBoard(),
+        currentPlayer: PLAYER_1_PIECE,
+        player1Name: name,
+        player2Name: null,
+        isGameOver: false,
+        winner: null,
+    };
+    
+    listenForGameEvents(gameId);
+    showWaitingRoom();
 }
 
-function showNameEntryScreen() {
-    nameEntryContainer.classList.remove('hidden');
+function handleJoinGame(gameId: string, name: string) {
+    localPlayerRole = PLAYER_2_PIECE;
+    listenForGameEvents(gameId);
+    sendGameMessage(gameId, { type: 'player_join', payload: { playerName: name } });
+    updateStatus('Joining game...');
+    showScreen('game'); // Tentatively show game screen, will be updated on first state receive
+}
+
+// --- SCREEN MANAGEMENT ---
+function showScreen(screen: 'lobby' | 'waiting' | 'game') {
+    lobbyContainer.classList.add('hidden');
+    waitingRoomContainer.classList.add('hidden');
     gameContent.classList.add('hidden');
-    player1NameInput.value = '';
-    player2NameInput.value = '';
+    if (screen === 'lobby') lobbyContainer.classList.remove('hidden');
+    if (screen === 'waiting') waitingRoomContainer.classList.remove('hidden');
+    if (screen === 'game') gameContent.classList.remove('hidden');
+}
+
+function showWaitingRoom() {
+    shareLinkInput.value = window.location.href;
+    showScreen('waiting');
 }
 
 function showGameScreen() {
-    nameEntryContainer.classList.add('hidden');
-    gameContent.classList.remove('hidden');
+    if (!gameState || !localPlayerRole) return;
+    const isP1 = localPlayerRole === PLAYER_1_PIECE;
+    player1Label.textContent = `${isP1 ? gameState.player1Name + " (You)" : gameState.player1Name} (Red)`;
+    player2Label.textContent = `${!isP1 ? (gameState.player2Name ?? 'You') + " (You)" : (gameState.player2Name ?? 'Opponent')} (Black)`;
+    showScreen('game');
+    renderBoard();
+    updateStatus();
+}
+
+function getOpponentName(): string {
+    if (!gameState) return 'Opponent';
+    return localPlayerRole === PLAYER_1_PIECE ? gameState.player2Name ?? 'Opponent' : gameState.player1Name;
 }
 
 // --- INITIALIZATION ---
 function init() {
-    window.addEventListener('hashchange', loadGameFromURL);
-    loadGameFromURL(); // Load state on initial page load
-
     nameForm.addEventListener('submit', (e) => {
         e.preventDefault();
-        player1Name = player1NameInput.value.trim() || 'Player 1';
-        player2Name = player2NameInput.value.trim() || 'Player 2';
+        const name = playerNameInput.value.trim();
+        if (!name) return;
         
-        boardState = createInitialBoard();
-        currentPlayer = PLAYER_PIECE;
-        isGameOver = false;
-        selectedPiece = null;
-        validMovesForSelectedPiece = [];
-        
-        updateURLWithState(true); // Create the first game link
+        const gameId = window.location.hash.substring(1);
+        if (gameId) {
+            handleJoinGame(gameId, name);
+        } else {
+            handleCreateGame(name);
+        }
     });
-
-    resetButton.addEventListener('click', resetGame);
-    closeModalButton.addEventListener('click', hideShareModal);
 
     copyLinkButton.addEventListener('click', () => {
         shareLinkInput.select();
-        navigator.clipboard.writeText(shareLinkInput.value).then(() => {
-            copyLinkButton.textContent = 'Copied!';
-        });
+        document.execCommand('copy');
+        copyLinkButton.textContent = 'Copied!';
+        setTimeout(() => { copyLinkButton.textContent = 'Copy'; }, 2000);
     });
+    
+    resetButton.addEventListener('click', () => window.location.href = window.location.pathname);
 
     boardElement.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
@@ -431,6 +506,26 @@ function init() {
             handleSquareClick({ currentTarget: square } as any);
         }
     });
+
+    chatForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const text = chatInput.value.trim();
+        if (text && gameState) {
+            const senderName = localPlayerRole === PLAYER_1_PIECE ? gameState.player1Name : (gameState.player2Name ?? 'Player 2');
+            const message: GameMessage = {
+                type: 'chat_message',
+                payload: { senderName, text }
+            };
+            sendGameMessage(gameState.gameId, message);
+            chatInput.value = '';
+        }
+    });
+    
+    const gameId = window.location.hash.substring(1);
+    if(gameId) {
+        playerNameInput.focus();
+    }
+    showScreen('lobby');
 }
 
 init();
