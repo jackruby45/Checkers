@@ -183,10 +183,7 @@ function getMovesForPiece(board: Board, r: number, c: number): Move[] {
             moves.push({ from: [r, c], to: [newR, newC] });
         }
     }
-
-    // Jumps (handled by getJumpsForPiece, but needed for move generation)
-    moves.push(...getJumpsForPiece(board, r, c));
-    return [...new Set(moves)]; // Return unique moves
+    return moves;
 }
 
 function getJumpsForPiece(board: Board, r: number, c: number): Move[] {
@@ -391,11 +388,20 @@ function handleIncomingMessage(message: GameMessage) {
             sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
         }
     } else if (message.type === 'game_state') {
-        const wasWaiting = !gameState?.player2Name && !!message.payload.player2Name;
+        // Player 1, while waiting for an opponent, should not process any game state updates.
+        // This prevents a race condition where a stale message from the pub/sub service
+        // could make Player 1 skip the waiting room.
+        if (localPlayerRole === PLAYER_1_PIECE && !gameState?.player2Name) {
+            return;
+        }
+
+        const isJoiningAsPlayer2 = localPlayerRole === PLAYER_2_PIECE && !gameState;
         gameState = message.payload;
-        if (wasWaiting) {
+
+        if (isJoiningAsPlayer2) {
             showGameScreen();
         }
+
         selectedPiece = null;
         validMovesForSelectedPiece = [];
         renderBoard();
