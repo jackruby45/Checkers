@@ -38,6 +38,10 @@ type GameMessage = {
 };
 
 const REALTIME_TOPIC_PREFIX = 'checkers-game-';
+const STORAGE_KEY_GAME_ID = 'checkersGameId';
+const STORAGE_KEY_PLAYER_ROLE = 'checkersPlayerRole';
+const STORAGE_KEY_PLAYER_NAME = 'checkersPlayerName';
+
 
 // --- DOM ELEMENTS ---
 const lobbyContainer = document.getElementById('lobby-container')!;
@@ -388,17 +392,18 @@ function handleIncomingMessage(message: GameMessage) {
             sendGameMessage(gameState.gameId, { type: 'game_state', payload: gameState });
         }
     } else if (message.type === 'game_state') {
-        // Player 1, while waiting for an opponent, should not process any game state updates.
-        // This prevents a race condition where a stale message from the pub/sub service
-        // could make Player 1 skip the waiting room.
-        if (localPlayerRole === PLAYER_1_PIECE && !gameState?.player2Name) {
-            return;
-        }
-
-        const isJoiningAsPlayer2 = localPlayerRole === PLAYER_2_PIECE && !gameState;
+        const isFirstStateReception = !gameState;
         gameState = message.payload;
 
-        if (isJoiningAsPlayer2) {
+        if (isFirstStateReception) {
+            // This is the first time we're getting the state, either as P2 joining
+            // or any player rejoining. We need to show the game screen.
+            showGameScreen();
+        }
+
+        // If the game state now includes a second player, ensure the game screen is shown.
+        // This handles moving P1 from the waiting room to the game.
+        if(gameState.player2Name && waitingRoomContainer.classList.contains('hidden') === false){
             showGameScreen();
         }
 
@@ -458,17 +463,59 @@ function handleCreateGame(name: string) {
         winner: null,
     };
     
+    localStorage.setItem(STORAGE_KEY_GAME_ID, gameId);
+    localStorage.setItem(STORAGE_KEY_PLAYER_ROLE, localPlayerRole);
+    localStorage.setItem(STORAGE_KEY_PLAYER_NAME, name);
+    
     listenForGameEvents(gameId);
     showWaitingRoom();
 }
 
 function handleJoinGame(gameId: string, name: string) {
     localPlayerRole = PLAYER_2_PIECE;
+    
+    localStorage.setItem(STORAGE_KEY_GAME_ID, gameId);
+    localStorage.setItem(STORAGE_KEY_PLAYER_ROLE, localPlayerRole);
+    localStorage.setItem(STORAGE_KEY_PLAYER_NAME, name);
+    
     listenForGameEvents(gameId);
     sendGameMessage(gameId, { type: 'player_join', payload: { playerName: name } });
     updateStatus('Joining game...');
     showScreen('game'); // Tentatively show game screen
 }
+
+function handleRejoinGame(gameId: string, role: PlayerRole, name: string) {
+    localPlayerRole = role;
+    playerNameInput.value = name;
+    
+    if (role === PLAYER_1_PIECE) {
+        // Player 1 is rejoining. We must recreate the initial game state so
+        // they can correctly process the 'player_join' message from Player 2
+        // and to prevent the 'game_state' handler from prematurely switching screens.
+        gameState = {
+            gameId,
+            board: createInitialBoard(),
+            currentPlayer: PLAYER_1_PIECE,
+            player1Name: name,
+            player2Name: null,
+            isGameOver: false,
+            winner: null,
+        };
+        // Also ensure the URL hash is present, in case of bookmarking.
+        window.location.hash = gameId;
+
+        // Show the waiting room. The message listener will handle transitioning
+        // to the game if P2 joins or has already joined.
+        showWaitingRoom();
+    } else {
+        // P2 is rejoining, so the game is definitely active.
+        showScreen('game');
+        updateStatus('Reconnecting to your game...');
+    }
+    
+    listenForGameEvents(gameId);
+}
+
 
 // --- SCREEN MANAGEMENT ---
 function showScreen(screen: 'lobby' | 'waiting' | 'game') {
@@ -505,6 +552,7 @@ function getOpponentName(): string {
 
 // --- INITIALIZATION ---
 function init() {
+    // Setup persistent event listeners
     nameForm.addEventListener('submit', (e: SubmitEvent) => {
         e.preventDefault();
         const name = playerNameInput.value.trim();
@@ -525,7 +573,12 @@ function init() {
         setTimeout(() => { copyLinkButton.textContent = 'Copy'; }, 2000);
     });
     
-    resetButton.addEventListener('click', () => window.location.href = window.location.pathname);
+    resetButton.addEventListener('click', () => {
+        localStorage.removeItem(STORAGE_KEY_GAME_ID);
+        localStorage.removeItem(STORAGE_KEY_PLAYER_ROLE);
+        localStorage.removeItem(STORAGE_KEY_PLAYER_NAME);
+        window.location.href = window.location.pathname
+    });
 
     boardElement.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
@@ -539,24 +592,33 @@ function init() {
         e.preventDefault();
         const text = chatInput.value.trim();
         if (text && gameState) {
-            const senderName = localPlayerRole === PLAYER_1_PIECE ? gameState.player1Name : (gameState.player2Name ?? 'Player 2');
+            const localPlayerName = localPlayerRole === PLAYER_1_PIECE ? gameState.player1Name : (gameState.player2Name ?? 'Player 2');
             const message: GameMessage = {
                 type: 'chat_message',
-                payload: { senderName, text }
+                payload: { senderName: localPlayerName, text }
             };
             sendGameMessage(gameState.gameId, message);
-            // Also display locally immediately
-            displayChatMessage(senderName, text);
+            displayChatMessage(localPlayerName, text);
             chatInput.value = '';
         }
     });
     
-    const gameId = window.location.hash.substring(1);
-    if(gameId) {
-        playerNameInput.focus();
-        playFriendButton.textContent = 'Join Game';
+    // Check for a saved game session
+    const savedGameId = localStorage.getItem(STORAGE_KEY_GAME_ID);
+    const savedPlayerRole = localStorage.getItem(STORAGE_KEY_PLAYER_ROLE) as PlayerRole | null;
+    const savedPlayerName = localStorage.getItem(STORAGE_KEY_PLAYER_NAME);
+
+    if (savedGameId && savedPlayerRole && savedPlayerName) {
+        handleRejoinGame(savedGameId, savedPlayerRole, savedPlayerName);
+    } else {
+        // No saved game, show the lobby
+        const gameId = window.location.hash.substring(1);
+        if(gameId) {
+            playerNameInput.focus();
+            playFriendButton.textContent = 'Join Game';
+        }
+        showScreen('lobby');
     }
-    showScreen('lobby');
 }
 
 init();
